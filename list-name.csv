@@ -1,0 +1,18 @@
+ip address,account name,os type
+100.0.1.40,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Red Hat Enterprise Linux 8
+100.0.15.50,100.0.1.77-cityapp-demo-VI_MYSQL,Red Hat Enterprise Linux 8
+100.0.1.40,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Microsoft Windows Server 2016 or later
+100.0.1.41,100.0.1.77-cityapp-demo-VI_MYSQL,Microsoft Windows Server 2019
+100.0.1.42,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Microsoft Windows Server 2016 or later
+100.0.1.43,100.0.1.77-cityapp-demo-VI_MYSQL,Red Hat Enterprise Linux 8
+100.0.1.44,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Red Hat Enterprise Linux 8
+100.0.1.45,100.0.1.77-cityapp-demo-VI_MYSQL,Microsoft Windows Server 2016 or later
+100.0.1.46,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Ubuntu Linux 20.04 LTS
+100.0.1.47,100.0.1.77-cityapp-demo-VI_MYSQL,Ubuntu Linux 20.04 LTS
+100.0.1.48,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Ubuntu Linux 20.04 LTS
+100.0.1.49,100.0.1.77-cityapp-demo-VI_MYSQL,Ubuntu Linux 20.04 LTS
+100.0.15.50,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Red Hat Enterprise Linux 8
+100.0.15.51,100.0.1.77-cityapp-demo-VI_MYSQL,Ubuntu Linux 20.04 LTS
+100.0.30.25,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Microsoft Windows Server 2019
+100.0.15.53,100.0.1.77-cityapp-demo-VI_MYSQL,Microsoft Windows Server 2016 or later
+100.0.30.25,LOB_Conjur03/VI_DevOps/100.0.1.1-Aaron2 (2),Red Hat Enterprise Linux 8
