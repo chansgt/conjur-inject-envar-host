@@ -1,4 +1,3 @@
-
 import csv
 import json
 import requests
@@ -7,7 +6,6 @@ from tqdm import tqdm
 import logging
 import time
 import os
-import re
 from datetime import datetime
 from urllib.parse import quote
 from collections import defaultdict
@@ -17,7 +15,7 @@ ORG_ID = 1
 account = "VI"
 atoken = "ffULT4ib9nzz6UmJha6TZ6FalNUauJ"
 username = "host%2fprod%2fserver%2fjenkins%2f100.0.1.43-jenkins"
-password = "8j5xvt3jj1ch42h4hcrv1wgaq502tvypf62w2dhhn17b97f21y2eqfp"
+password = "10c8bsm1nzekh72q7jezmwyxvay20trkxyy0vhzxwyz32e126nybv"
 conjur_url = "https://dap-master.cyberarkdemo.com"
 tower_url = "https://100.0.1.43"
 # ============================
@@ -27,30 +25,27 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 csv_file = input("Enter CSV filename (e.g. list-name.csv): ").strip()
 
 now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-logging.basicConfig(
-    filename=f'{now}-conjur-inject.log',
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s: %(message)s'
-)
+log_format = '%(asctime)s - %(levelname)s: %(message)s'
+logging.basicConfig(filename=f'{now}-conjur-inject.log', level=logging.INFO, format=log_format)
 
-logging.info("\n=============== %s ===============", now)
-logging.info("=============== start job ===============")
+def log_step(level, activity, code=None, msg=None):
+    message = f"{activity}"
+    if code:
+        message += f" | {code} - {msg}"
+    getattr(logging, level.lower())(message)
 
-def group_hosts_by_segment_and_os(csv_filename):
+log_step("info", "=============== start job ===============")
+
+def group_hosts(csv_filename):
     grouped = {}
-    os_count_by_segment = {}
-
-    with open(csv_filename, newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
+    stats = {}
+    with open(csv_filename, newline='') as f:
+        reader = csv.DictReader(f)
         for row in reader:
             ip = row['ip address'].strip()
             os_type = row['os type'].strip().lower()
-
-            ip_segments = ip.split('.')
-            if len(ip_segments) < 3:
-                continue
-
-            segment = '.'.join(ip_segments[:3])
+            account_name = row['account name'].strip()
+            segment = '.'.join(ip.split('.')[:3])
 
             if 'windows' in os_type or 'microsoft' in os_type:
                 system = 'win'
@@ -60,42 +55,29 @@ def group_hosts_by_segment_and_os(csv_filename):
                 inv_name = f"Audit Hardening Prod Conjur-{segment}"
 
             key = (inv_name, system)
-            if key not in grouped:
-                grouped[key] = []
-            grouped[key].append({
+
+            grouped.setdefault(key, []).append({
                 'ip': ip,
-                'account_name': row['account name'].strip()
+                'account_name': account_name,
+                'os_type': os_type
             })
+            stats.setdefault(segment, {'win': 0, 'nix': 0})
+            stats[segment][system] += 1
+    return grouped, stats
 
-            if segment not in os_count_by_segment:
-                os_count_by_segment[segment] = {'win': 0, 'nix': 0}
-            os_count_by_segment[segment][system] += 1
-
-    return grouped, os_count_by_segment
-
-def create_inventory(name, system):
+def create_or_get_inventory(name, system):
     url = f"{tower_url}/api/v2/inventories/"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {atoken}"
-    }
-
-    logging.info("------------------ Processing Create Inventory ------------------")
-    search_url = f"{url}?name={quote(name)}"
-    r = requests.get(search_url, headers=headers, verify=False)
-    if r.status_code == 200:
-        results = r.json().get("results", [])
-        if results:
-            logging.info(f"Inventory '{name}' already exists with ID: {results[0]['id']}")
-            logging.info("------------------ End of Create Inventory ------------------")
-            return results[0]["id"]
-
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {atoken}"}
+    r = requests.get(f"{url}?name={quote(name)}", headers=headers, verify=False)
+    if r.status_code == 200 and r.json()["results"]:
+        inv_id = r.json()["results"][0]["id"]
+        log_step("info", f"Inventory exists: {name}", 200, f"ID {inv_id}")
+        return inv_id
     payload = {
         "name": name,
         "description": "Inventory created from script",
         "organization": ORG_ID
     }
-
     if system == "win":
         payload["variables"] = json.dumps({
             "ansible_connection": "winrm",
@@ -103,198 +85,183 @@ def create_inventory(name, system):
             "ansible_winrm_transport": "ntlm",
             "ansible_winrm_server_cert_validation": "ignore"
         })
-
     r = requests.post(url, headers=headers, json=payload, verify=False)
     if r.status_code == 201:
         inv_id = r.json()["id"]
-        logging.info(f"Created inventory '{name}' with ID: {inv_id}")
-        logging.info("------------------ End of Create Inventory ------------------")
+        log_step("info", f"Created inventory: {name}", 201)
         return inv_id
     else:
-        logging.error(f"Failed to create inventory: {r.status_code} {r.text}")
-        logging.info("------------------ End of Create Inventory ------------------")
+        log_step("ERROR", f"Failed to create inventory: {name}", r.status_code, r.text)
         return None
 
 auth_token = None
-token_acquired_time = None
+token_time = None
 
 def authenticate():
-    global auth_token, token_acquired_time
-    url_login = f"{conjur_url}/api/authn/{account}/{username}/authenticate"
-    headers_login = {'Accept-Encoding': 'base64', 'Content-Type': 'text/plain'}
-
-    r = requests.post(url_login, headers=headers_login, data=password, verify=False)
+    global auth_token, token_time
+    url = f"{conjur_url}/api/authn/{account}/{username}/authenticate"
+    headers = {'Accept-Encoding': 'base64', 'Content-Type': 'text/plain'}
+    r = requests.post(url, headers=headers, data=password, verify=False)
     if r.status_code == 200:
         auth_token = r.text
-        token_acquired_time = time.time()
-        logging.info("Conjur authentication successful")
-        return auth_token
+        token_time = time.time()
+        log_step("info", "Authenticated to Conjur")
+        return True
     else:
-        logging.error(f"Conjur authentication failed: {r.status_code} {r.text}")
-        return None
+        log_step("ERROR", "Conjur authentication failed", r.status_code, r.text)
+        return False
 
 def token_expired():
-    return (time.time() - token_acquired_time) > 420 if token_acquired_time else True
+    return (time.time() - token_time) > 420 if token_time else True
 
-# ========== Main Logic ==========
+host_groups, os_stats = group_hosts(csv_file)
 
-host_groups, os_stats = group_hosts_by_segment_and_os(csv_file)
-
-# Log OS count per segment
 print("\n📊 OS Count per Segment:")
-logging.info("------------------ Report OS Count per Segment ------------------")
-for segment, count in os_stats.items():
-    print(f"  {segment}: Windows = {count['win']}, Unix = {count['nix']}")
-    logging.info(f"  {segment}: Windows = {count['win']}, Unix = {count['nix']}")
-logging.info("------------------ End of Report ------------------")
+log_step("info", "=== OS Count per Segment ===")
+for seg, count in os_stats.items():
+    msg = f"{seg}: Windows={count['win']}, Unix={count['nix']}"
+    print(f"  {msg}")
+    log_step("info", msg)
 
 if not authenticate():
-    print("[ERROR] Cannot authenticate to Conjur.")
+    print("[ERROR] Authentication failed.")
     exit(1)
 
-total_hosts = sum(len(hosts) for hosts in host_groups.values())
-success_count = 0
-fail_count = 0
-failed_hosts = defaultdict(list)
+success, updated, failed = [], [], []
 
-with tqdm(total=total_hosts, desc="🚀 Creating Hosts", unit="host") as pbar:
-    for (inventory_name, system_type), hosts in host_groups.items():
-        inventory_id = create_inventory(inventory_name, system_type)
+total = sum(len(v) for v in host_groups.values())
 
-        if not inventory_id:
-            for host in hosts:
-                ip = host['ip']
-                search = host['account_name']
-                segment = '.'.join(ip.split('.')[:3])
-                failed_hosts[segment].append({
-                    "ip address": ip,
-                    "account name": search,
-                    "segment": segment,
-                    "os type": system_type,
-                    "inventory id": None,
-                    "inventory name": inventory_name,
-                    "error": "Inventory creation failed"
-                })
-            fail_count += len(hosts)
-            pbar.update(len(hosts))
+with tqdm(total=total, desc="🚀 Processing Hosts", unit="host") as bar:
+    for (inv_name, system), hosts in host_groups.items():
+        inv_id = create_or_get_inventory(inv_name, system)
+        if not inv_id:
+            for h in hosts:
+                h.update({"segment": '.'.join(h['ip'].split('.')[:3]), "inventory name": inv_name, "ERROR": "Inventory creation failed"})
+                failed.append(h)
+                bar.update(1)
             continue
 
-        for host in hosts:
-            ip = host['ip']
-            search = host['account_name']
-            segment = '.'.join(ip.split('.')[:3])
-            search_encoded = quote(search, safe='')
+        for h in hosts:
+            ip = h["ip"]
+            acct = h["account_name"]
+            seg = '.'.join(ip.split('.')[:3])
+            log_step("info", f"Start processing {ip}")
 
-            logging.info(f"======>> start inject for ip: {ip}")
+            if token_expired() and not authenticate():
+                h.update({"segment": seg, "inventory name": inv_name, "ERROR": "Token expired"})
+                failed.append(h)
+                bar.update(1)
+                continue
 
-            if token_expired():
-                if not authenticate():
-                    failed_hosts[segment].append({
-                        "ip address": ip,
-                        "account name": search,
-                        "segment": segment,
-                        "os type": system_type,
-                        "inventory id": inventory_id,
-                        "inventory name": inventory_name,
-                        "error": "Token authentication failed"
-                    })
-                    fail_count += 1
-                    pbar.update(1)
-                    continue
-
-            url_var = f"{conjur_url}/api/resources/{account}?kind=variable&search={search_encoded}"
+            search = quote(acct, safe='')
+            var_url = f"{conjur_url}/api/resources/{account}?kind=variable&search={search}"
             headers_var = {'Authorization': f'Token token="{auth_token}"'}
-            response_var = requests.get(url_var, headers=headers_var, verify=False)
+            r = requests.get(var_url, headers=headers_var, verify=False)
 
-            if response_var.status_code != 200:
-                failed_hosts[segment].append({
-                    "ip address": ip,
-                    "account name": search,
-                    "segment": segment,
-                    "os type": system_type,
-                    "inventory id": inventory_id,
-                    "inventory name": inventory_name,
-                    "error": f"Fetch variable failed: {response_var.status_code} {response_var.text}"
-                })
-                fail_count += 1
-                pbar.update(1)
+            if r.status_code != 200:
+                h.update({"segment": seg, "inventory name": inv_name, "ERROR": f"Fetch variable failed: {r.status_code} - {r.text}"})
+                log_step("ERROR", f"{ip} failed to process with ERROR code {r.status_code} - {r.text}")
+                failed.append(h)
+                bar.update(1)
                 continue
 
-            data = response_var.json()
+            data = r.json()
             uvar = pvar = ""
-            for item in data:
-                var_id = item.get("id", "")
-                if var_id.endswith("/username"):
-                    uvar = var_id.split(account + ":variable:")[-1]
-                if var_id.endswith("/password"):
-                    pvar = var_id.split(account + ":variable:")[-1]
-
-            if not (uvar and pvar):
-                failed_hosts[segment].append({
-                    "ip address": ip,
-                    "account name": search,
-                    "segment": segment,
-                    "os type": system_type,
-                    "inventory id": inventory_id,
-                    "inventory name": inventory_name,
-                    "error": "Missing username or password variable"
-                })
-                fail_count += 1
-                pbar.update(1)
+            for d in data:
+                vid = d.get("id", "")
+                if vid.endswith("/username"):
+                    uvar = vid.split(account + ":variable:")[-1]
+                elif vid.endswith("/password"):
+                    pvar = vid.split(account + ":variable:")[-1]
+            if not uvar or not pvar:
+                h.update({"segment": seg, "inventory name": inv_name, "ERROR": "Username/password not found in Conjur"})
+                log_step("ERROR", f"{ip} failed to process reason: Username/password not found in Conjur")
+                failed.append(h)
+                bar.update(1)
                 continue
+            
+            log_step("INFO", f"{ip} success found variable path in Conjur")
 
-            variables_dict = {
+            var_payload = {
                 "ansible_host": ip,
-                "ansible_user": f"{{{{ lookup('cyberark.conjur.conjur_variable','{uvar}',validate_certs=False) }}}}",
-                "ansible_password": f"{{{{ lookup('cyberark.conjur.conjur_variable','{pvar}',validate_certs=False) }}}}"
+                "ansible_user": "{{ lookup('cyberark.conjur.conjur_variable','" + uvar + "',validate_certs=False) }}",
+                "ansible_password": "{{ lookup('cyberark.conjur.conjur_variable','" + pvar + "',validate_certs=False) }}",
+                "ansible_become_pass": "{{ lookup('cyberark.conjur.conjur_variable','" + pvar + "',validate_certs=False) }}"
             }
 
-            payload_tower = json.dumps({
+            host_payload = {
                 "name": ip,
-                "description": "Conjur Credential - Auto Created Script",
+                "description": "Auto created by script",
                 "enabled": True,
-                "variables": json.dumps(variables_dict)
-            })
-
-            headers_tower = {
-                'Content-Type': 'application/json',
-                'Authorization': f"Bearer {atoken}"
+                "variables": json.dumps(var_payload)
             }
+            
+            headers = {"Authorization": f"Bearer {atoken}", "Content-Type": "application/json"}
 
-            url_atower = f"{tower_url}/api/v2/inventories/{inventory_id}/hosts/"
-            response_tower = requests.post(url_atower, headers=headers_tower, data=payload_tower, verify=False)
-            if response_tower.status_code == 201:
-                logging.info(f"Host {ip} created.")
-                success_count += 1
+            check_url = f"{tower_url}/api/v2/inventories/{inv_id}/hosts/?name={ip}"
+            r_check = requests.get(check_url, headers=headers, verify=False)
+
+            if r_check.status_code == 200 and r_check.json()["results"]:
+                host_id = r_check.json()["results"][0]["id"]
+                update_url = f"{tower_url}/api/v2/hosts/{host_id}/"
+                r_update = requests.patch(update_url, headers=headers, json=host_payload, verify=False)
+                if r_update.status_code == 200:
+                    h.update({
+                        "segment": seg,
+                        "inventory name": inv_name,
+                        "ERROR": "no ERROR"
+                    })
+                    updated.append(h)
+                    log_step("info", f"Updated host: {ip}")
+                else:
+                    h.update({"segment": seg, "inventory name": inv_name, "ERROR": f"Update failed: {r_update.status_code} - {r_update.text}"})
+                    log_step("ERROR", f"{ip} failed to process with ERROR code {r.status_code} - {r.text}")
+                    failed.append(h)
             else:
-                failed_hosts[segment].append({
-                    "ip address": ip,
-                    "account name": search,
-                    "segment": segment,
-                    "os type": system_type,
-                    "inventory id": inventory_id,
-                    "inventory name": inventory_name,
-                    "error": f"Host creation failed: {response_tower.status_code} {response_tower.text}"
-                })
-                fail_count += 1
-            pbar.update(1)
+                create_url = f"{tower_url}/api/v2/inventories/{inv_id}/hosts/"
+                r_create = requests.post(create_url, headers=headers, json=host_payload, verify=False)
+                if r_create.status_code == 201:
+                    h.update({
+                        "segment": seg,
+                        "inventory name": inv_name,
+                        "ERROR": "no ERROR"
+                    })
+                    success.append(h)
+                    log_step("info", f"Created host: {ip}")
+                else:
+                    h.update({"segment": seg, "inventory name": inv_name, "ERROR": f"Update failed: {r_update.status_code} - {r_update.text}"})
+                    log_step("ERROR", f"{ip} failed to process with ERROR code {r.status_code} - {r.text}")
+                    failed.append(h)
+            bar.update(1)
 
-# ========== Write failed hosts ==========
-if failed_hosts:
-    failed_filename = f"{now}-failed-hosts.csv"
-    with open(failed_filename, 'w', newline='') as csvfile:
-        fieldnames = ['ip address', 'account name', 'segment', 'os type', 'inventory id', 'inventory name', 'error']
+# ========== Write CSVs ==========
+def write_segmented_csv(data, filename_prefix):
+    if not data:
+        return
+    grouped = defaultdict(list)
+    for row in data:
+        segment = row.get("segment", "unknown")
+        grouped[segment].append(row)
+
+    filename = f"{now}-{filename_prefix}-hosts.csv"
+    with open(filename, 'w', newline='') as csvfile:
+        fieldnames = ['ip', 'account_name', 'os_type', 'segment', 'inventory name', 'ERROR']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        for segment in sorted(failed_hosts.keys()):
-            for row in failed_hosts[segment]:
+        for segment in sorted(grouped.keys()):
+            for row in grouped[segment]:
                 writer.writerow(row)
             writer.writerow({})  # Blank line per segment
-    logging.info(f"⚠️ Failed hosts written to {failed_filename}")
-    print(f"\n⚠️ Failed hosts written to {failed_filename}")
+
+    log_step("info", f"{filename_prefix.capitalize()} hosts written to {filename}")
+    print(f"📄 {filename_prefix.capitalize()} hosts written to {filename}")
+
+write_segmented_csv(success, "success")
+write_segmented_csv(updated, "updated")
+write_segmented_csv(failed, "failed")
 
 # ========== Summary ==========
-summary_msg = f"\n✅ Success: {success_count} | ❌ Failed: {fail_count}"
-print(summary_msg)
-logging.info(summary_msg)
-logging.info("=============== end job ===============")
+summary = f"\n✅ Success: {len(success)} | ✏️ Updated: {len(updated)} | ❌ Failed: {len(failed)}"
+print(summary)
+log_step("info", summary)
+log_step("info", "=============== end job ===============")
